@@ -1,0 +1,1889 @@
+#!/usr/bin/perl -w
+use strict;
+use List::Util qw{max};
+
+my $path = '/src/perl/git';
+my $patch_path = '/src/perl/study_chunk';
+my $branch = 'sc';
+my $EMBED = 'embed.fnc';
+my $PERL_H = 'perl.h';
+my $REGCOMP = 'regcomp.c';
+
+my $CRE = qr{
+	(?(DEFINE)
+		(?<COMMENT> /\* (?> [^*]+ | \* (?!/) )* \*/ )
+		(?<WS>
+			(?:
+				(?> [ \t]+ )
+				| (?> (?&COMMENT) )
+				(?# treat preprocessor directives as whitespace )
+				| \n (?! \#)
+				| (?: \n | ^ ) (?> \# .* (?= \n) )
+			)+
+			| (?<= \W)
+			| (?= \W)
+		)
+		(?<STRING> " (?> [^"\\] | \\[\d\D] )* " )
+		(?<CHAR> ' (?: [^'\\] | \\[\d\D] ) ' )
+		(?<PROT> (?: (?&COMMENT) | (?&STRING) | (?&CHAR) ) )
+		(?<BLOCK> \{ (?:
+			(?&BLOCK) | (?&PROT) | / (?! \*) | (?> [^"'/{}]+ )
+		)* \} )
+		(?<PARENS> \( (?:
+			(?&PARENS) | (?&PROT) | / (?! \*) | (?> [^"'/()]+ )
+		)* \) )
+		(?<INDEX> \[ (?:
+			(?&INDEX) | (?&PROT) | / (?! \*) | (?> [^"'/\[\]]+ )
+		)* \] )
+		(?<ID> (?: [A-Za-z_] \w* ) )
+		(?<DECL> (?: (?&ID) \b [\s*]* )+ (?&ID) \b (?:
+			(?&PARENS) | (?&PROT) | / (?! \*) | (?> [^;"'/()]+ )
+		)* ; )
+		(?<KEYWORD> (?: if | else | while | switch | case | default ) \b )
+		(?<STMT>
+			(?> (?&WS) )
+			(?>
+				(?# optional labels )
+				(?! (?&KEYWORD) )
+				(?> (?&ID) ) (?> (?&WS) ) : (?> (?&WS) )
+			)*
+			(?>
+				if (?> (?&WS) ) (?> (?&PARENS) ) (?> (?&STMT) )
+				(?> (?> (?&WS) ) else (?> (?&STMT) ) )?
+			|
+				while (?&WS) (?&PARENS) (?&STMT)
+			|
+				switch (?&WS) (?&PARENS) (?&WS) (?&BLOCK)
+			|
+				(?&BLOCK)
+			|
+				(?! (?&KEYWORD) )
+				(?:
+					(?&PARENS)
+					| (?&INDEX)
+					| (?&PROT)
+					| / (?! \*)
+					| (?> [^;"'/{}()\[\]]+ )
+				)* ;
+			)
+		)
+	)
+}xm;
+
+my $ERE = qr{
+	(?(DEFINE)
+		(?<WS> (?: [ \t] | \\ \n )* )
+		(?<ID> (?: \b [A-Za-z_] \w* \b ) )
+		(?<TYPE>
+			(?&ID) (?: (?&WS) \*)*
+			(?: (?&WS) (?&ID) (?: (?&WS) \*)* )*
+		)
+		(?<DECL> (?&TYPE) (?&WS) (?&ID) )
+		(?<PRE> ^ \w+ (?&WS) \| (?&TYPE) (?&WS) \| )
+		(?<POST> (?: (?&WS) \| (?&DECL) )* (?<! \\) \n )
+		(?<EMBED> (?&PRE) (?&ID) (?&POST) )
+	)
+}xm;
+
+my($sha) = @ARGV;
+chdir($path) or die $!;
+
+sys([qw{ git clean -dfx }]);
+sys([qw{ git reset --hard HEAD }]);
+sys([qw{ git checkout }, $sha ]);
+sys([qw{ git reset --hard HEAD }]);
+sys([qw{ git branch -D }, $branch ]);
+sys([qw{ git checkout -b }, $branch ]);
+
+apply(\&move_params, <<TEXT);
+study_chunk: move params into struct for refactoring
+TEXT
+
+apply(\&study_chunk_one_frame, <<TEXT);
+study_chunk: separate study_chunk_one_frame
+
+Removes the need for labels fake_study_recurse and finish.
+TEXT
+
+apply(\&extract_dump, <<TEXT);
+study_chunk: extract dump_study_chunk
+TEXT
+
+apply(\&study_chunk_one_node, <<TEXT);
+study_chunk: switch study_chunk_one_frame to study_chunk_one_node
+
+Move per-frame diagnostics and outer loop up to study_chunk, leaving
+just the work to do on a single node. This requires a return value
+to show if the inner loop should be terminated.
+
+The outdent of what remains is done separately in the next commit.
+TEXT
+
+apply(\&reindent, <<TEXT);
+study_chunk_one_node: reindent
+    
+1900-odd lines of whitespace, deindented after removal of outer loop
+TEXT
+
+apply(\&rck_elide_nothing, <<TEXT);
+study_chunk: extract rck_elide_nothing
+TEXT
+
+apply(\&extract_rck_definep, <<TEXT);
+study_chunk: extract rck_definep
+TEXT
+
+apply(\&extract_rck_branch, <<TEXT);
+study_chunk: extract rck_branch
+TEXT
+
+apply(\&split_rck_branch, <<TEXT);
+study_chunk: split up rck_branch
+
+Give BRANCH, BRANCHJ and IFTHEN each their own check routines; move the
+shared code to rck_make_trie.
+TEXT
+
+apply(\&destruct_code, <<TEXT);
+study_chunk: remove 'code' from params struct
+
+This is now used only in a couple of places in rck_make_trie, it can
+now be discovered there instead.
+TEXT
+
+apply(\&extract_suspend_gosub, <<TEXT);
+study_chunk: extract rck_suspend
+
+This handles SUSPEND and GOSUB.
+TEXT
+
+apply(\&extract_rck_enframe, <<TEXT);
+study_chunk: extract rck_enframe
+
+Note that this is another form of study_chunk recursion, we should see
+if it's possible to replace either this or the explicit recursive calls
+with the other to simplify things.
+TEXT
+
+apply(\&split_suspend_gosub, <<TEXT);
+study_chunk: split rck_gosub from rck_suspend
+TEXT
+
+apply(\&clean_suspend, <<TEXT);
+study_chunk: clean up rck_suspend
+TEXT
+
+apply(\&clean_gosub, <<TEXT);
+study_chunk: clean up rck_gosub
+TEXT
+
+apply(\&extract_rck_exact, <<TEXT);
+study_chunk: extract rck_exact
+
+EXACT, LEXACT, EXACT_REQ8, LEXACT_REQ8, EXACTL
+TEXT
+
+apply(\&unfolded_multi_char, <<TEXT);
+join_exact: mark REG_UNFOLDED_MULTI_SEEN directly
+TEXT
+
+apply(\&extract_rck_exactf, <<TEXT);
+study_chunk: extract rck_exactf
+
+EXACTF, EXACTFL, EXACTFU, EXACTFAA, EXACTFUP, EXACTFLU8, EXACTFAA_NO_TRIE,
+EXACTFU_REQ8, EXACTFU_S_EDGE
+TEXT
+
+apply(\&extract_rck_exactish, <<TEXT);
+study_chunk: extract rck_exactish
+
+This handles all ops with regkind EXACT, first calling join_exact() and
+then handing off to the subsidiary rck_exact or rck_exactf.
+TEXT
+
+apply(\&extract_varies1, <<TEXT);
+study_chunk: extract rck_whilem, rck_refish, rck_clump
+
+The non-curly nodes of REGNODE_VARIES.
+TEXT
+
+apply(\&extract_do_curly, <<TEXT);
+study_chunk: extract rck_do_curly
+
+.. and simplify optimize_curly_tail to rck_elide_nothing()
+TEXT
+
+exit 0;
+
+sub sys {
+	my($cmd) = @_;
+	warn join(' ', @$cmd), "\n";
+	my $rc = system(@$cmd);
+	die ".. failed ($rc)\n" if $rc;
+	return;
+}
+
+sub apply {
+	my($code, $commit) = @_;
+	&$code;
+	sys([qw{ git commit -a -m }, $commit ]);
+	return;
+}
+
+sub apply_canned {
+	my($file) = @_;
+	my $path = join '/', $patch_path, $file;
+	sys([qw{ git am }, $path ]);
+	return;
+}
+
+sub apply_patch {
+	my($file) = @_;
+	my $path = join '/', $patch_path, $file;
+	sys([qw{ patch -p1 -i }, $path ]);
+	return;
+}
+
+sub slurp {
+	my($file) = @_;
+	open(my $f, '<', $file) or die "$file: $!";
+	my $text = do { local $/; <$f> };
+	close $f;
+	return $text;
+}
+
+sub unslurp {
+	my($file, $text) = @_;
+	open(my $f, '>', $file) or die "$file: $!";
+	print $f $text;
+	close $f;
+	if ($file eq $EMBED) {
+		sys(['regen/embed.pl']);
+	}
+	return;
+}
+
+sub mod_file {
+	my($file, $desc, $code) = @_;
+	my $text = slurp($file);
+	$code->() || die "failed: $desc" for $text;
+	unslurp($file, $text);
+	return;
+}
+
+# $locate coderef should return a ref to a substr of $_
+sub mod_substr {
+	my($file, $desc, $locate, $code) = @_;
+	return mod_file($file, $desc, sub {
+		my($start, $end) = $locate->();
+		my $substr = \substr($_, $start, $end - $start);
+		my $good;
+		$good = $code->() || die "failed: $desc" for $$substr;
+		return $good;
+	});
+}
+
+sub mod_substr_code_only {
+	my($file, $desc, $locate, $code) = @_;
+	return mod_file($file, $desc, sub {
+		my($start, $end) = $locate->();
+		my $substr = \substr($_, $start, $end - $start);
+		my @part = split m{(/\* .*? \*/ | " .*? ")}xs, $$substr;
+		unshift @part, '' if $part[0] =~ m{^(?:/\*|")};
+		my $good = 0;
+		$good += $code->() for @part[ grep !($_ & 1), 0 .. $#part ];
+		$$substr = join '', @part;
+		return $good;
+	});
+}
+
+sub mod_macro {
+	my($file, $desc, $macro, $code) = @_;
+	mod_substr($file, $desc, sub { identify_macro($macro) }, $code);
+}
+
+sub mod_func {
+	my($file, $desc, $func, $code) = @_;
+    mod_substr($file, $desc, sub { identify_func($func) }, $code);
+}
+
+sub mod_func_code {
+	my($file, $desc, $func, $code) = @_;
+	mod_substr_code_only($file, $desc, sub { identify_func($func) }, $code);
+}
+
+sub mod_embed {
+	my($desc, $func, $code) = @_;
+	mod_substr($EMBED, $desc, sub { identify_embed($func) }, $code);
+}
+
+sub aceil {
+	my($n) = @_;
+	return 0 if $n < 0;
+	my $m = int($n);
+	return $m == $n ? $m : $m + 1;
+}
+
+sub indent {
+	my($size, $string) = @_;
+
+	# accept both spaces-only and mixed tab/space styles,
+	# absorbing space-followed-by-tab insanities, but emit only spaces
+	return $string =~ s{
+		^ (?: \ * (?=\t) )? (\t*) (\ *) (?=\S|\z)
+	}{
+		my $s = length($1) * 8 + length($2) + $size;
+		' ' x $s
+	}xmegr;
+}
+
+sub outdent {
+	my($size, $string) = @_;
+
+	# accept both spaces-only and mixed tab/space styles,
+	# absorbing space-followed-by-tab insanities, but emit only spaces
+	return $string =~ s{
+		^ (?: \ * (?=\t) )? (\t*) (\ *) (?=\S|\z)
+	}{
+		my $s = length($1) * 8 + length($2) - $size;
+		' ' x max($s, 0)
+	}xmegr;
+}
+
+sub reindent_args {
+	my($string, $desc, $prefix) = @_;
+	$string =~ s{
+		^ ([ ]+) ($prefix) ( (?&PARENS) )
+		$CRE
+	}{
+		my($indent, $head, $args) = ($1, $2, $3);
+		my $new = 4 + length($indent);
+		$args =~ s/^\(//;
+		$args =~ s/\)\z//;
+		my @args = split /(?<=,)\s*/, $args;
+		my @lines;
+		while (@args) {
+			my $i = 1;
+			my $cur = $new + length($args[0]);
+			while (@args > $i && $cur + 1 + length($args[$i]) <= 78) {
+				$cur += 1 + length $args[$i++];
+			}
+			push @lines, indent($new, join ' ', splice @args, 0, $i);
+		}
+		join "\n", "$indent$head(", @lines, "$indent)";
+	}xme or die "Could not reindent $desc";
+	return $string;
+}
+
+sub deblock {
+	my($string) = @_;
+	$string =~ s{ ^ \s* \{ \n }{}x or die "Could not deblock <$_>";
+	$string =~ s{ ^ \s* \} \s* \z }{}xm or die "Could not deblock <$_>";
+	$string = outdent(4, $string);
+	return $string;
+}
+
+sub embed {
+	my($func, $flags, $retval, $args, $where) = @_;
+	my $len1 = length($flags);
+	my $len2 = max($len1, 8) + length($retval) + 1;
+	my $len3 = max($len2, 16) + length($func) + 1;
+	my $text = sprintf(
+		"%s%s|%s%s|%s%s|%s\n",
+		$flags, "\t" x aceil(1 - $len1 / 8),
+		$retval, "\t" x aceil(2 - $len2 / 8),
+		$func, "\t" x aceil(4 - $len3 / 8),
+		join " \\\n\t\t\t\t|", @$args
+	);
+	my $before = $where->{before} ? qr{
+		(?= (?&PRE) \Q$where->{before}\E )
+		$ERE
+	}xm : '';
+	# can't use lookbehind since unavoidably variable, so capture and restore
+	my $after = $where->{after}
+		? qr{
+			( (?&PRE) \Q$where->{after}\E (?&POST) )
+			$ERE
+		}xm
+		: qr{()};
+	mod_file($EMBED, "embed $func", sub {
+		s{ $after $before }{$1$text}x;
+	});
+	return;
+}
+
+sub deembed {
+	my($func) = @_;
+	mod_file($EMBED, "deembed $func", sub {
+		s{
+			(?&PRE) \Q$func\E (?&POST)
+			$ERE
+		}{}xm
+	});
+	return;
+}
+
+sub hoist_assign {
+	my($var, $text) = @_;
+	$text =~ s{
+		(?:
+			( ^ [ ]*
+				(?= (?&DECL) \n )
+				\w+ \b [ *]* \Q$var\E
+			)
+			\s* (?: = [^;]+ )? ; \n
+		)
+		( .*? )
+		(?: ^ [ ]* \Q$var\E \s*
+			( = [^;]* ; \n )
+		)
+		$CRE
+	}{$1 $3$2}xms or die "could not hoist assignment of $var in <$text>";
+	return $text;
+}
+
+sub hoist_cond {
+	my($var, $cond, $text) = @_;
+	$text =~ m{
+		^ ([ ]+) if \s* \Q$cond\E \s*
+		( (?&BLOCK) ) \s* else \s* ( (?&BLOCK) )
+		$CRE
+	}xm or die "Could not find condition '$cond' for hoist_cond of '$var'";
+	my $indent = $1;
+	my $pos = $-[0];
+	my($ts, $te, $fs, $fe) = ($-[2], $+[2], $-[3], $+[3]);
+	my($tvar, $fvar);
+	for ([$fs, $fe, \$fvar], [$ts, $te, \$tvar]) {
+		my($s, $e, $rvar) = @$_;
+		my $rtext = \substr($text, $s + 1, $e - $s - 2);
+		$$rtext =~ s{
+			^ [ ]* \Q$var\E \s* = \s* 
+			(
+				(?:
+					(?&PARENS) | (?&PROT) | / (?! \*) | (?> [^;"'/()]+ )
+				)*
+			) ; (?: \s* (?&COMMENT) )* \s*? \n
+			$CRE
+		}{
+			$$rvar = $1;
+			'';
+		}xme or die "Could not find assignment of '$var' in '$$rtext'";
+	}
+	substr($text, $pos, 0) = "$indent$var = $cond ? $tvar : $fvar;\n";
+	return $text;
+}
+
+sub elide_var {
+	my($var, $text) = @_;
+	my $val;
+	$text =~ s{
+		^ [ ]* (?= (?&DECL) ) \w+ \s+ \Q$var\E \s* = \s*
+		( (?=\w) [^;]*? ) \s* ; \n
+		$CRE
+	}{
+		$val = $1;
+		'';
+	}xme or die "could not elide $var in <$text>";
+	$text =~ s{ \b \Q$var\E \b }{$val}xg;
+	return $text;
+}
+
+sub identify_macro {
+	my($macro) = @_;
+	m{
+		# find the start
+		^ \# \s* define \s+ \Q$macro\E \b
+
+		# find the end
+		(?: [^\n\\] | \\. )* \n
+	}xsm or die "Could not find macro $macro";
+	return ($-[0], $+[0]);
+}
+sub substr_macro {
+	my($start, $end) = identify_macro(@_);
+	return \substr($_, $start, $end - $start);
+}
+
+sub identify_func {
+	my($func) = @_;
+	m{
+		# we rely on the func decl being the only place the func name
+		# appears at the start of a line
+		^ \Q$func\E \b
+
+		# skip past the signature, and any additional comments before body
+		(?: \s* (?&COMMENT) )* \s* (?&PARENS) (?: \s* (?&COMMENT) )*
+
+		# capture the body
+		\s* ( (?&BLOCK) )
+		$CRE
+	}xsm or die "Could not find function $func";
+	return ($-[1], $+[1]);
+}
+sub substr_func {
+	my($start, $end) = identify_func(@_);
+	return \substr($_, $start, $end - $start);
+}
+
+sub identify_block {
+	my($pat) = @_;
+	m{ $pat \s* ( (?&BLOCK) ) $CRE }x
+			or die "Could not find block matching $pat";
+	return ($-[1], $+[1]);
+}
+sub substr_block {
+	my($start, $end) = identify_block(@_);
+	return \substr($_, $start, $end - $start);
+}
+
+sub identify_paren {
+	my($pat) = @_;
+	m{ $pat \s* ( (?&PARENS) ) $CRE }x
+			or die "Could not find parens matching $pat";
+	return ($-[1], $+[1]);
+}
+sub substr_paren {
+	my($start, $end) = identify_paren(@_);
+	return \substr($_, $start, $end - $start);
+}
+
+sub identify_embed {
+	my($func) = @_;
+	m{
+		^ \w+ [ \t]*
+		\| (?&ID) (?: [ \t*]+ (?&ID) )* [ \t]*
+		\| \Q$func\E [ \t]*
+		(?: [^\\\n] | \\ .)*
+		(?: \\ \n (?: [^\\\n] | \\ .)* )*
+		\n
+		$CRE
+	}xm or die "Could not find embed func for $func";
+	return ($-[0], $+[0]);
+}
+sub substr_embed {
+	my($start, $end) = identify_embed(@_);
+	return \substr($_, $start, $end - $start);
+}
+
+sub add_assert {
+	my($text, $name) = @_;
+	my $assert =  'PERL_ARGS_ASSERT_' . uc($name);
+
+	# We want the args assert macro to come directly after the initial
+	# block of variable declarations, which may have comments interspersed.
+	$text =~ s{
+		(
+			\A \{ (?: [ \t]* (?&COMMENT) )* \n
+			( (?:
+				(?: \s* (?&COMMENT) )*
+				\s* (?&DECL)
+				([ \t]* (?&COMMENT))* [ \t]* \n
+			)* )
+		)
+		\n?		(?# absorb an extra newline if there is one)
+		$CRE
+	}{
+		$1
+		. (length($2) ? "\n" : '')
+		. indent(4, "$assert;\n")
+		. "\n";
+	}xme or die "Could not insert args assertion for $name";
+	return $text;
+}
+
+sub extract_rck {
+	my($name, $cond, $cleanup) = @_;
+	my $msg = "extract $name";
+	embed(
+		$name, 'ES', 'bool',
+		[ 'NN RExC_state_t *pRExC_state', 'NN rck_params_t *params' ],
+		{ before => 'get_ANYOFM_contents' },
+	);
+	my($indent, $head, $text, $tail) = @_;
+	mod_func($REGCOMP, "extract $name", 'S_study_chunk_one_node', sub {
+		s{
+			^ ([ ]*) ( (?:\} \s* else \s+)? if \s* \Q$cond\E ) \s*
+			( (?&BLOCK) )
+			( (?: \s* else \s* (?=if|\{) )? )
+			$CRE
+		}{
+			($indent, $head, $text, $tail) = ($1, $2, $3, $4);
+			"$indent$head \{\n"
+			. indent(4, "${indent}return $name(pRExC_state, params);\n")
+			. "$indent\}" . (length($tail) ? " else " : "");
+		}xme;
+	});
+	$text = outdent(length($indent), $text);
+	for my $sub (@{ $cleanup // [] }) {
+		$sub->() for $text;
+	}
+
+	# Fallthrough behaviour is to update scan and return 0, so mimic that
+	# if it doesn't already finish with a return.
+	unless ($text =~ m{
+		^ \s* return \b .* \n
+		^ \} \z
+	}xm) {
+		$text =~ s{(?= ^ \} \z)}{
+			indent(4, "params->scan = regnext(params->scan);\n")
+			. indent(4, "return 0;\n");
+		}xme or die "Could not find tail of text";
+	}
+
+	$text = add_assert($text, $name);
+	$text = <<TEXT;
+STATIC bool
+S_$name(pTHX_ RExC_state_t *pRExC_state, rck_params_t *params)
+$text
+
+TEXT
+
+	mod_file($REGCOMP, "insert $name", sub {
+		s{(?= ^ STATIC \s+ bool \s* S_study_chunk_one_node )}{$text}xm
+	});
+}
+
+sub move_params {
+	my $decl = <<TEXT;
+struct rck_params;
+typedef struct rck_params rck_params_t;
+
+TEXT
+	my $struct_decl = <<TEXT;
+typedef struct rck_params {
+    regnode **scanp;    /* scanp: Start here (read-write). */
+    SSize_t *minlenp;
+    SSize_t *deltap;    /* deltap: Write maxlen-minlen here. */
+    regnode *last;      /* last: Stop before this one. */
+    scan_data_t *data;  /* data: string data about the pattern */
+    I32 stopparen;      /* stopparen: treat close N as END */
+    U32 recursed_depth; /* recursed: which subroutines have we recursed into */
+    regnode_ssc *and_withp; /* and_withp: Valid if flags & SCF_DO_STCLASS_OR */
+    U32 flags;
+    U32 depth;
+
+    SSize_t     min; /* must be at least this number of characters to match */
+    I32         pars;
+    I32         code;
+    regnode*    scan;
+    regnode*    next;
+    SSize_t     delta;
+    int         is_inf;
+    int         is_inf_internal; /* The studied chunk is infinite */
+    I32         is_par;
+    scan_data_t data_fake;
+    SV*         re_trie_maxbuff;
+    regnode*    first_non_open;
+    SSize_t     stopmin;
+    scan_frame* frame;
+} rck_params_t;
+
+TEXT
+	mod_file($PERL_H, 'declare rck_params, rck_params_t', sub {
+		s{
+			(?<= ^ struct \s _reg_trie_data; \n\n)
+			(?= ^ \#endif)
+		}{$decl}xm;
+	});
+
+	mod_macro($REGCOMP, 'params for INIT_AND_WITHP', 'INIT_AND_WITHP', sub {
+		s{\b and_withp \b}{params->and_withp}gx
+	});
+
+	mod_file($REGCOMP, 'declare rck_params', sub {
+		s{
+			(?<= ^ \} \n\n)
+			(?= /\* .*? \*/ \n STATIC \s+ SSize_t \n S_study_chunk)
+		}{$struct_decl}xm;
+	});
+
+	mod_func_code($REGCOMP, 'params in study_chunk', 'S_study_chunk', sub {
+		s{(?<! -> ) (?<! \. ) \b(
+			scanp | minlenp | deltap | last | data | stopparen
+			| recursed_depth | and_withp | flags | depth | min
+			| pars | code | scan | next | delta | is_inf | is_inf_internal
+			| is_par | data_fake | re_trie_maxbuff | first_non_open | stopmin
+			| frame
+		)\b}{params->$1}gx;
+	});
+
+	my $olddecl = <<TEXT;
+STATIC SSize_t
+S_study_chunk(pTHX_ RExC_state_t *pRExC_state, regnode **scanp,
+                        SSize_t *minlenp, SSize_t *deltap,
+			regnode *last,
+			scan_data_t *data,
+			I32 stopparen,
+                        U32 recursed_depth,
+			regnode_ssc *and_withp,
+			U32 flags, U32 depth)
+			/* scanp: Start here (read-write). */
+			/* deltap: Write maxlen-minlen here. */
+			/* last: Stop before this one. */
+			/* data: string data about the pattern */
+			/* stopparen: treat close N as END */
+			/* recursed: which subroutines have we recursed into */
+			/* and_withp: Valid if flags & SCF_DO_STCLASS_OR */
+TEXT
+	my $newdecl = <<TEXT;
+STATIC SSize_t
+S_study_chunk(
+    pTHX_ RExC_state_t *pRExC_state,
+    regnode **scanp,    /* scanp: Start here (read-write). */
+    SSize_t *minlenp,
+    SSize_t *deltap,    /* deltap: Write maxlen-minlen here. */
+    regnode *last,      /* last: Stop before this one. */
+    scan_data_t *data,  /* data: string data about the pattern */
+    I32 stopparen,      /* stopparen: treat close N as END */
+    U32 recursed_depth, /* recursed: which subroutines have we recursed into */
+    regnode_ssc *and_withp, /* and_withp: Valid if flags & SCF_DO_STCLASS_OR */
+    U32 flags,
+    U32 depth)
+TEXT
+	mod_file($REGCOMP, 'clean study_chunk decl', sub {
+		s{
+			^\Q$olddecl\E
+			(?= \{ \n )
+		}{$newdecl}xm;
+	});
+
+	my $oldvars = <<TEXT;
+    SSize_t final_minlen;
+    /* There must be at least this number of characters to match */
+    SSize_t params->min = 0;
+    I32 params->pars = 0, params->code;
+    regnode *params->scan = *params->scanp, *params->next;
+    SSize_t params->delta = 0;
+    int params->is_inf = (params->flags & SCF_DO_SUBSTR) && (params->data->flags & SF_IS_INF);
+    int params->is_inf_internal = 0;		/* The studied chunk is infinite */
+    I32 params->is_par = OP(params->scan) == OPEN ? ARG(params->scan) : 0;
+    scan_data_t params->data_fake;
+    SV *params->re_trie_maxbuff = NULL;
+    regnode *params->first_non_open = params->scan;
+    SSize_t params->stopmin = SSize_t_MAX;
+    scan_frame *params->frame = NULL;
+    GET_RE_DEBUG_FLAGS_DECL;
+TEXT
+
+	my $newvars = <<TEXT;
+    rck_params_t s_params;
+    rck_params_t *params = &s_params;
+    SSize_t final_minlen;
+
+    GET_RE_DEBUG_FLAGS_DECL;
+
+    params->scanp = scanp;
+    params->minlenp = minlenp;
+    params->deltap = deltap;
+    params->last = last;
+    params->data = data;
+    params->stopparen = stopparen;
+    params->recursed_depth = recursed_depth;
+    params->and_withp = and_withp;
+    params->flags = flags;
+    params->depth = depth;
+
+    params->min = 0;
+    params->pars = 0;
+    params->scan = *params->scanp;
+    params->delta = 0;
+    params->is_inf = (params->flags & SCF_DO_SUBSTR) && (params->data->flags & SF_IS_INF);
+    params->is_inf_internal = 0;
+    params->is_par = OP(params->scan) == OPEN ? ARG(params->scan) : 0;
+    params->re_trie_maxbuff = NULL;
+    params->first_non_open = params->scan;
+    params->stopmin = SSize_t_MAX;
+    params->frame = NULL;
+TEXT
+
+	mod_func($REGCOMP, 'set study_chunk vars', 'S_study_chunk', sub {
+		s{
+			(?<= \A \{ \n )
+			( (?: ^ \s* dVAR; \n )? )
+			\Q$oldvars\E
+		}{$1$newvars}xm
+	});
+
+	mod_func($REGCOMP, 'ws cleanups', 'S_study_chunk', sub {
+		s{
+			\b params->depth \s* \+ \s* 1
+		}{params->depth + 1}xg;
+		s{
+			, \s* params->
+		}{, params->}xg;
+		s{
+			^ (?=.*\bparams->)
+			(.*?) \b = \b (?=regnext)
+		}{$1 = }xm;
+		my $cleaner = sub {
+			$_[0] =~ s{ (?<= ^\( ) [ ]+ (?=\S) }{}x;
+			$_[0] =~ s{ (\S) [ ]+ (?= \) \s* $ ) }{$1}x;
+		};
+		s{
+			^ ( \s+ (?:if|while) \s* ) ( (?&PARENS) ) ( (?: [ ]* \{ )? )
+			$CRE
+		}{
+			my($key, $cond, $tail) = ($1, $2, $3);
+			if ($cond =~ /params->/) {
+				$cleaner->($cond) ;
+				$tail = " \{" if length($tail);
+			}
+			"$key$cond$tail";
+		}xmeg;
+		s{
+			( ^ \s* join_exact \( .*? )
+			( \s+ ) (&unfolded_multi_char,)
+			( \n \s+ ) (?= 0 )
+		}{$1$4$3$2}xm;
+	});
+	return;
+}
+
+sub study_chunk_one_frame {
+	embed(
+		'study_chunk_one_frame', 'ES', 'void',
+		[ 'NN RExC_state_t *pRExC_state', 'NN rck_params_t *params' ],
+		{ after => 'study_chunk' },
+	);
+
+	mod_func($REGCOMP, 'split out study_chunk_one_frame', 'S_study_chunk', sub {
+		s{
+			# uses of this label become return()s instead
+			^ \s* \n \s* finish \s* : \s* \n
+
+			# the sense of this test will change
+			^ \s* if \s+ \( \s* params->frame \s* \) \s* \{ \s* \n
+
+			# the rest will become the tail of what stays as study_chunk
+			(^ .*) \n (?= \} \z)
+		}{}xms or die "no finish";
+		my $tail = $1;
+		# fixup comment
+		$tail =~ s{we need to unwind recursion\.}{unwind recursion};
+
+		# FIXME: do this only in the chunk that becomes one_frame
+		s{
+			^ (\s*) goto \s+ finish \s* ; \s*? \n
+		}{${1}return;\n}gxm or die "no gotos";
+
+		my $insert = <<"TAIL";
+
+    while (1) {
+        study_chunk_one_frame(pRExC_state, params);
+        if (!params->frame)
+            break;
+
+$tail
+}
+
+STATIC void
+S_study_chunk_one_frame(pTHX_ RExC_state_t *pRExC_state, rck_params_t *params)
+{
+    dVAR;
+    GET_RE_DEBUG_FLAGS_DECL;
+    PERL_ARGS_ASSERT_STUDY_CHUNK_ONE_FRAME;
+
+TAIL
+
+		# now we just loop to recurse, we no longer need the label; also,
+		# the assert after now just matches the loop termination condition
+		s{^ \s* fake_study_recurse: \s*? \n}{$insert}xm or die "no fake";
+		s{
+			^ \s* goto \s+ fake_study_recurse \s* ; \s* \n
+			(\s* \} \n \s*? \n)
+			\s* assert \s* \( \s* ! \s* params->frame \s* \) \s* ; \s* \n
+		}{$1}xm;
+	});
+}
+
+sub extract_dump {
+	my $dsc;
+	mod_func($REGCOMP, 'remove debug', 'S_study_chunk_one_frame', sub {
+		s{
+			^ ( [ \t]* DEBUG_r \( )
+				\s* ( RExC_study_chunk_recursed_count\+\+; )
+			\s* ( \) ; \n )
+			^ ( [ \t]* DEBUG_OPTIMISE_MORE_r \( ) \n
+				( \s* (?&BLOCK) )
+			\s* ( \) ; \n )
+			$CRE
+		}{
+			my($h1, $b1, $t1) = ($1, $2, $3);
+			my($h2, $b2, $t2) = ($4, $5, $6);
+			($dsc, $b2)
+					= ($b2, '{ dump_study_chunk(aTHX_ pRExC_state, params); }');
+			"$h1$b1$t1$h2$b2$t2\n";
+		}xme;
+	});
+	for ($dsc) {
+		$_ = outdent(4, $_);
+		s{(?<=^\{\n)}{    dVAR;\n};
+		s{^(\s*\w+\()[ ]+(?=\S)}{$1}gm;
+		s{,(?=\w|\()}{, }g;
+		s{aTHX_\s+"}{aTHX_ "}g;
+		s{(\S)[ ]+;}{$1;}g;
+		my $cleaner = sub {
+            $_[0] =~ s{ (?<= ^\( ) [ ]+ (?=\S) }{}x;
+            $_[0] =~ s{ (\S) [ ]+ (?= \) \s* $ ) }{$1}x;
+		};
+		s{
+			^ (\s* for \s*) ( (?&PARENS) )
+			$CRE
+		}{
+			my($key, $cond) = ($1, $2);
+			$cleaner->($cond);
+			"$key$cond";
+		}xmge;
+		s{
+			^ ( \s* ) U32 \s+ i \s* ;
+			\s* U32 \s+ j \s* ;
+		}{${1}U32 i, j;}xm;
+		m{
+			^ ([ \t]*) Perl_re_indentf \s* ( (?&PARENS) )
+			$CRE
+		}xm or die "cannot find re_indentf() in <$_>";
+		my($indent, $pstart, $pend) = ($1, $-[2], $+[2]);
+		substr($_, $pstart, $pend - $pstart) =~ s{
+			\A \(
+				\s* ( \w+ )
+				\s+ ( (?&STRING) ) \s*
+				, \s* ( (?: (?&PARENS) \s* )? \w+ (?: -> \w+ )? ) \s*
+				, \s* ( (?: (?&PARENS) \s* )? \w+ (?: -> \w+ )? ) \s*
+				, \s* ( (?: (?&PARENS) \s* )? \w+ (?: -> \w+ )? ) \s*
+				, \s* ( (?: (?&PARENS) \s* )? \w+ (?: -> \w+ )? ) \s*
+				, \s* ( (?: (?&PARENS) \s* )? \w+ (?: -> \w+ )? ) \s*
+				, \s* ( (?: (?&PARENS) \s* )? \w+ (?: -> \w+ )? ) \s*
+				, \s* ( (?: (?&PARENS) \s* )? \w+ (?: -> \w+ )? ) \s*
+			\) \s* \z
+			$CRE
+		}{
+			my($athx, $format, @args)
+					= ($1, $2, $3, $4, $5, $6, $7, $8, $9);
+			my $di = indent(4, $indent);
+			my $args = $athx . join(",", map "\n$di$_", $format, @args);
+			sprintf "(%s%s)", $args, "\n$indent";
+		}xme or die "cannot clean args in <@{[substr($_, $pstart, $pend - $pstart)]}>";
+		$_ = sprintf <<TEXT, $dsc;
+#ifdef DEBUGGING
+void dump_study_chunk(pTHX_ RExC_state_t *pRExC_state, rck_params_t *params)
+%s
+#endif
+
+TEXT
+	}
+
+	my $marker = '/* the return from this sub is the minimum length';
+	mod_file($REGCOMP, 'insert debug function', sub {
+		s{(?=\Q$marker\E)}{$dsc};
+	});
+}
+		
+sub study_chunk_one_node {
+	embed(
+        'study_chunk_one_node', 'ES', 'bool',
+        [ 'NN RExC_state_t *pRExC_state', 'NN rck_params_t *params' ],
+        { after => 'study_chunk' },
+    );
+	deembed('study_chunk_one_frame');
+	mod_substr($REGCOMP, 'rename one_frame to one_node', sub {
+		m{^STATIC void\nS_study_chunk_one_frame}m or die "can't find func";
+		return ($-[0], $+[0]);
+	}, sub {
+		s{void}{bool} or die "can't find return value";
+		s{one_frame}{one_node} or die "can't find func name";
+	});
+
+	my($preamble, $debug_flags);
+	mod_func($REGCOMP, 'extract frame logic', 'S_study_chunk_one_node', sub {
+		# extract preamble, leave just the per-node loop block
+		s{
+			( \A \{ \n )
+			( \s* dVAR; \n )
+			\s* ( GET_RE_DEBUG_FLAGS_DECL; ) \n
+			\s* PERL_ARGS_ASSERT_STUDY_CHUNK_ONE_FRAME; \n
+			\n
+			# preamble
+			( .*? ^ \s* while \s* (?&PARENS) ) \s*
+			# body
+			( (?&BLOCK) )
+			# assert no postamble
+			(?= \s* \} \z )
+			$CRE
+		}{$1$2$5}xsm or die "could not parse frame logic: \n$_";
+		($debug_flags, $preamble) = ($3, $4);
+
+		# move the debug flags decl to where it's needed
+		my $s = substr_block(qr{
+			^ \s* if \s* \( \s* SvIV \( params->re_trie_maxbuff \)
+			\s* >= \s* 0 \s* \) \s*
+		}xm);
+		$$s =~ s{
+			^ (\s*) (U32 \s+ count \s* = \s* 0 \s* ; \n)
+		}{$1$2$1$debug_flags\n}xm;
+
+		# reinsert an appropriate PERL_ARGS_ASSERT
+		s{
+			^ (\s*) (bool \s+ unfolded_multi_char \s* = \s* FALSE; \n)
+		}{$1$2\n${1}PERL_ARGS_ASSERT_STUDY_CHUNK_ONE_NODE;\n\n}xm;
+
+		# strip the extra braces, and add final return
+		s{
+			^ ( \{ \n )
+			( \s* dVAR; \n )
+			\{ \n 
+			(.*)
+			(?<=\n) (\s*) \} \n
+			( \} ) \z
+		}{
+			$1 . indent(4, $2) . $3 . indent(4, "${4}return 0;\n") . $5
+		}xse;
+	});
+
+	# clean up the preamble a bit
+	$preamble =~ s{
+		([ \t]*) while \s* \( \s* params->scan \s* && \s* OP\(params->scan\)
+		\s* != \s* END \s* && \s* params->scan \s* < \s* params->last \s* \)
+	}{
+		my $margin = $1;
+		$margin . "while (params->scan\n"
+		. indent(4, $margin) . "&& OP(params->scan) != END\n"
+		. indent(4, $margin) . "&& params->scan < params->last\n"
+		. $margin . ')'
+	}xe or die "no match in <$preamble>";
+
+	# now move that preamble into the caller, changing it from per-frame
+	# to per-node
+	my $comment = '/* while there are frames to do */';
+	mod_func($REGCOMP, 'add frame loop comment', 'S_study_chunk', sub {
+		s{ ^ (?= ([\ \t]*) while \s* \(1\) ) }{$1$comment\n}xm;
+	});
+	mod_func($REGCOMP, 'add frame loop logic', 'S_study_chunk', sub {
+		my $s = substr_block(qr{ while \s* \(1\) \s* }x);
+		$$s =~ s{
+			( ^ \s* ) study_chunk_one_frame\(pRExC_state,\ params\); \n
+		}{
+			my $margin = $1;
+			join '',
+				indent(4, $preamble),
+					" {\n",
+				indent(4, $margin),
+					"if (study_chunk_one_node(pRExC_state, params))\n",
+				indent(8, $margin),
+						"break;\n",
+				$margin,
+					"}\n\n",
+		}xme;
+	});
+
+	# for the original per-node loop, we must now change relevant
+	# continue, break and return, being careful not to change irrelevant ones
+	mod_func($REGCOMP, 'change node loop', 'S_study_chunk_one_node', sub {
+		# first we must find embedded constructs for which the effect of
+		# continue/break would be internal: for, while, do, switch
+		my @stack;
+		s{
+			\b (
+				do \s* (?&BLOCK) \s* while \s* (?&PARENS) 
+				| (?: for | while | switch ) \s* (?&PARENS) \s* (?&BLOCK)
+			)
+			$CRE
+		}{
+			push @stack, $1;
+			'---token<' . $#stack . '>---'
+		}xge;
+
+		# modify returns in the stacked chunks
+		s{\b return \s* ;}{return 1;}xg for @stack;
+		# 'continue' is relevant in switch blocks, but not in do/for/while
+		for (grep /^switch/, @stack) {
+			# for correctness, we should recursively mask out nested
+			# constructs
+			s{\b continue \s* ;}{return 0;}xg;
+		}
+
+		# modify all in the top-level
+		s{\b return \s* ;}{return 1;}xg;
+		s{\b continue \s* ;}{return 0;}xg;
+		s{\b break \s* ;}{return 1;}xg;
+
+		# restore the chunks
+		s{---token<(\d+)>---}{$stack[$1]}g;
+		1;
+	});
+	return;
+}
+
+sub reindent {
+	mod_func($REGCOMP, 'reindent', 'S_study_chunk_one_node', sub {
+		s{ ^ (\{) (.*) (\}) \z }{
+			$1 . outdent(4, $2) . $3
+		}xse;
+	});
+}
+
+sub rck_elide_nothing {
+	embed(
+        'rck_elide_nothing', 'ES', 'void',
+        [ 'NN regnode *node' ],
+        { after => 'study_chunk_one_node' },
+    );
+	my $comment = 'Follow the next-chain of the current node';
+	my($fromarg, $toarg) = ('params->scan' => 'node');
+	my($text, $indent);
+	mod_func($REGCOMP, 'rck_elide_nothing', 'S_study_chunk_one_node', sub {
+		s{^
+			(
+				( [ ]* )
+				(?= /\* \s* \Q$comment\E )
+				( (?&COMMENT) ) \s* if \s* (?&PARENS) \s* (?&BLOCK)
+			)
+			$CRE
+		}{$2$3\n${2}rck_elide_nothing($fromarg);}xm
+				or die "could not extract elide_nothing";
+		($text, $indent) = ($1, $2);
+	});
+	$text = outdent(length($indent), $text);
+	$text =~ s{
+		^
+		( (?&COMMENT) \n )
+		( if \s* (?&PARENS) \s* (?&BLOCK) )
+		$CRE
+	}{
+		my($comment, $body) = ($1, $2);
+		$comment =~ s{\n( *)away all}{ away\n${1}all};
+		$comment =~ s{ *\*/\n}{\n */};
+		$body =~ s{\b\Q$fromarg\E\b}{$toarg}g;
+		$body = indent(4, $body);
+		<<TEXT;
+$comment
+STATIC void
+S_rck_elide_nothing(pTHX_ regnode *$toarg)
+{
+    dVAR;
+
+    PERL_ARGS_ASSERT_RCK_ELIDE_NOTHING;
+
+$body
+    return;
+}
+
+TEXT
+	}xme;
+
+	mod_file($REGCOMP, 'rck_elide_nothing definition', sub {
+		s{(?= ^ STATIC \s+ bool \s* S_study_chunk_one_node )}{$text}xm
+				or die "could not insert elide_nothing";
+	});
+}
+
+sub extract_rck_definep {
+	extract_rck('rck_definep', '(OP(params->scan) == DEFINEP)', [
+		sub { s{p=}{p =} },
+		sub {
+			$_ = reindent_args($_, 'recursed call',
+					qr{\Q(void)study_chunk\E\b});
+		},
+	]);
+}
+
+sub extract_rck_branch {
+	my $loc = "(
+        OP(params->scan) == BRANCH  ||
+        OP(params->scan) == BRANCHJ ||
+        OP(params->scan) == IFTHEN
+    )";
+	extract_rck('rck_branch', $loc, []);
+}
+
+sub split_rck_branch {
+	embed(
+		'rck_branchj', 'ES', 'bool',
+		[ 'NN RExC_state_t *pRExC_state', 'NN rck_params_t *params' ],
+		{ before => 'get_ANYOFM_contents' },
+	);
+	embed(
+		'rck_ifthen', 'ES', 'bool',
+		[ 'NN RExC_state_t *pRExC_state', 'NN rck_params_t *params' ],
+		{ before => 'get_ANYOFM_contents' },
+	);
+	embed(
+		'rck_make_trie', 'ES', 'void',
+		[ 'NN RExC_state_t *pRExC_state', 'NN rck_params_t *params' ],
+		{ before => 'get_ANYOFM_contents' },
+	);
+	my $loc = 'if (OP(params->next) == params->code || params->code == IFTHEN)';
+	my($indent, $cond, $text);
+	mod_func($REGCOMP, 'rck_make_trie', 'S_rck_branch', sub {
+		s{
+			^ ( [ ]+ ) ( \Q$loc\E ) \s* ( (?&BLOCK) )
+			$CRE
+		}{
+			($indent, $cond, $text) = ($1, $2, $3);
+			"$indent$cond {\n"
+			. indent(4, "${indent}rck_make_trie(pRExC_state, params);\n")
+			. "$indent}";
+		}xme;
+	});
+	$text = outdent(4, $text);
+	my $lastvar = 'regnode * const startbranch=params->scan;';
+	$text =~ s{
+		(?<= \Q$lastvar\E \n )
+		^
+		(?= \n ([ ]+) if \s* \( )
+	}{\n${1}PERL_ARGS_ASSERT_RCK_MAKE_TRIE;\n}xm
+			or die "Could not insert args assertion";
+	$text =~ s{ (?<=startbranch) = (?=params) }{ = }x;
+	$text = reindent_args($text, 'recursed call',
+			qr{\Qminnext = study_chunk\E\b});
+	$text =~ s{ (?<=SF_HAS_PAR) \| (?=SF_IN_PAR) }{ | }x;
+	$text =~ s{
+		\( \s* regnode_charclass \s* \* \s* \) \s*
+	}{(regnode_charclass *)}xg;
+	$text =~ s{made=0}{made = 0};
+	$text =~ s{\)>=0}{) >= 0};
+	$text =~ s{depth\+1}{depth + 1}g;
+	$text =~ s{\n\n\}\z}{\n\}};
+	$text = <<TEXT;
+STATIC void
+S_rck_make_trie(pTHX_ RExC_state_t *pRExC_state, rck_params_t *params)
+$text
+
+TEXT
+	mod_file($REGCOMP, 'rck_make_trie definition', sub {
+		s{(?= ^ STATIC \s+ bool \s* S_study_chunk_one_node )}{$text}xm
+				or die "could not insert rck_make_trie";
+	});
+	my($c1, $c2, $c3) = (
+		'OP(params->scan) == BRANCH',
+		'OP(params->scan) == BRANCHJ',
+		'OP(params->scan) == IFTHEN'
+	);
+	my $f1 = 'return rck_branch(pRExC_state, params);';
+	my $f2 = ($f1 =~ s{branch}{branchj}r);
+	my $f3 = ($f1 =~ s{branch}{ifthen}r);
+	mod_func($REGCOMP, 'split BRANCH test', 'S_study_chunk_one_node', sub {
+		s{
+			^ ([ ]+)
+			\} \s* else \s* if \s* \( \s*
+			(\Q$c1\E) \s* \|\| \s*
+			(\Q$c2\E) \s* \|\| \s*
+			(\Q$c3\E) \s*
+			\) \s* \{ \s*
+			(\Q$f1\E) \n
+			(?= ^ \s* \} \s* else )
+		}{
+			"${1}\} else if ($c1) \{\n"
+			. indent(4, "${1}$f1\n")
+			. "${1}\} else if ($c2) \{\n"
+			. indent(4, "${1}$f2\n")
+			. "${1}\} else if ($c3) \{\n"
+			. indent(4, "${1}$f3\n")
+		}xme;
+	});
+	my %body = (act => <<ACT, branch => <<T1, branchj => <<T2, ifthen => <<T3);
+
+    /* The op(next)==code check below is to see if we
+     * have "BRANCH-BRANCH", "BRANCHJ-BRANCHJ", "IFTHEN-IFTHEN"
+     * IFTHEN is special as it might not appear in pairs.
+     * Not sure whether BRANCH-BRANCHJ is possible, regardless
+     * we dont handle it cleanly. */
+    if (OP(params->next) == params->code || params->code == IFTHEN) {
+        rck_make_trie(pRExC_state, params);
+    }
+    else if ( params->code == BRANCHJ ) {  /* single branch is optimized. */
+        params->scan = NEXTOPER(NEXTOPER(params->scan));
+    } else			/* single branch is optimized. */
+        params->scan = NEXTOPER(params->scan);
+ACT
+
+    /* Not sure whether BRANCH-BRANCHJ is possible, regardless
+     * we dont handle it cleanly. */
+    if (OP(params->next) == BRANCH)
+        rck_make_trie(pRExC_state, params);
+    else
+        params->scan = NEXTOPER(params->scan);
+T1
+    if (OP(params->next) == BRANCHJ)
+        rck_make_trie(pRExC_state, params);
+    else
+        params->scan = NEXTOPER(NEXTOPER(params->scan));
+T2
+    rck_make_trie(pRExC_state, params);
+T3
+	chomp $body{$_} for keys %body;
+	(my $fe, $f1, $f2, $f3) = map {
+		my($op, $act) = ($_, $_);
+		$op = 'branch' if $op eq 'act';
+		<<TEXT;
+STATIC bool
+S_rck_${op}(pTHX_ RExC_state_t *pRExC_state, rck_params_t *params)
+{
+    PERL_ARGS_ASSERT_RCK_@{[ uc $op ]};
+
+    params->next = regnext(params->scan);
+    params->code = OP(params->scan);
+@{[ $body{$act} ]}
+    return 0;
+}
+TEXT
+	} qw{ act branch branchj ifthen };
+	mod_file($REGCOMP, 'split rck_branch', sub {
+		s{\Q$fe\E}{$f1\n$f2\n$f3};
+	});
+}
+
+sub destruct_code {
+	mod_file($REGCOMP, 'destruct code', sub {
+		s{
+			(^ [ ]* I32 \s+ pars ; \n)
+			^ [ ]* I32 \s* code ; \n
+			(?= ^ [ ]* regnode \* \s* scan ; \n )
+		}{$1}xm or die 'Could not update struct definition';
+		s{
+			^ \s* params->code \s* = \s* OP (?&PARENS) ; \n
+			$CRE
+		}{}xmg;
+	});
+	my $lastvar = 'regnode * const startbranch = params->scan;';
+	mod_func($REGCOMP, 'rename code', 'S_rck_make_trie', sub {
+		s{
+			^ ([ ]+) (\Q$lastvar\E \n)
+		}{${1}${2}${1}const I32 branchtype = OP(startbranch);\n}xm
+				or die 'Could not insert branchtype decl';
+		s{params->code}{branchtype}g;
+	});
+}
+
+sub extract_suspend_gosub {
+	extract_rck(
+		'rck_suspend',
+		'(OP(params->scan) == SUSPEND || OP(params->scan) == GOSUB)',
+		[ sub { s{(?<=[a-z])=}{ =}g } ],
+	);
+}
+
+sub extract_rck_enframe {
+	embed(
+		'rck_enframe', 'ES', 'void',
+		[ 'NN RExC_state_t *pRExC_state', 'NN rck_params_t *params',
+				'NN regnode *start', 'NN regnode *end',
+				'I32 paren', 'U32 recursed_depth' ],
+		{ before => 'get_ANYOFM_contents' },
+	);
+	my $loc = 'if (start)';
+	my($indent, $text);
+	mod_func($REGCOMP, 'extract enframe', 'S_rck_suspend', sub {
+		s{
+			^ ([ ]+) \Q$loc\E \s* ( (?&BLOCK) )
+			$CRE
+		}{
+			($indent, $text) = ($1, $2);
+			"$indent$loc \{\n"
+			. indent(4, "${indent}rck_enframe(pRExC_state, params, start, end, paren, my_recursed_depth);\n")
+			. indent(4, "${indent}return 0;\n")
+			. "$indent\}";
+		}xme;
+	});
+	$text = outdent(length($indent), $text);
+	$text = add_assert($text, 'rck_enframe');
+	# existing assert now duplicates args assert
+	$text =~ s{
+		^ [ ]+ assert \( end \) ; \n
+	}{}xm;
+	$text =~ s{(?<=[a-z])=}{ =}g;
+	$text =~ s{return 0}{return}g;
+	$text =~ s{my_recursed_depth}{recursed_depth}g;
+	$text = <<TEXT;
+STATIC void
+S_rck_enframe(pTHX_ RExC_state_t *pRExC_state, rck_params_t *params,
+        regnode *start, regnode *end, I32 paren, U32 recursed_depth)
+$text
+
+TEXT
+	mod_file($REGCOMP, 'insert rck_enframe', sub {
+		s{(?= ^ STATIC \s+ bool \s* S_study_chunk_one_node )}{$text}xm;
+	});
+}
+
+sub split_suspend_gosub {
+	embed(
+		'rck_gosub', 'ES', 'bool',
+		[ 'NN RExC_state_t *pRExC_state', 'NN rck_params_t *params' ],
+		{ after => 'rck_suspend' },
+	);
+	mod_func($REGCOMP, 'split suspend/gosub', 'S_study_chunk_one_node', sub {
+		my $c1 = q{OP(params->scan) == SUSPEND};
+		my $c2 = q{OP(params->scan) == GOSUB};
+		my $f1 = q{return rck_suspend(pRExC_state, params);};
+		my $f2 = q{return rck_gosub(pRExC_state, params);};
+		my $e = '} else if ';
+		s{
+			^ ([ ]*) \Q$e\E \( \Q$c1\E \s* \|\| \s* \Q$c2\E \) \s* \{ \n
+			^ ([ ]*) \Q$f1\E \n
+		}{
+			my($i1, $i2) = ($1, $2);
+			"$i1$e($c1) \{\n"
+			. "$i2$f1\n"
+			. "$i1$e($c2) \{\n"
+			. "$i2$f2\n";
+		}xme;
+	});
+	my $cond = '(OP(params->scan) != SUSPEND)';
+	my($gosub, $true, $false);
+	mod_func($REGCOMP, 'extract gosub from suspend', 'S_rck_suspend', sub {
+		$gosub = $_;
+		s{
+			^ [ ]+ if \s* \Q$cond\E \s* ( (?&BLOCK) )
+			\s* else \s* ( (?&BLOCK) )
+			$CRE
+		}{
+			($true, $false) = ($1, $2);
+			# for SUSPEND this is false
+			deblock($false);
+		}xme;
+	});
+	# Remove useless comment, so deblock() will work
+	$true =~ s{(?<= \A \{ ) \s* (?&COMMENT) $CRE }{}xm;
+
+	$gosub =~ s{(?<=PERL_ARGS_ASSERT_)RCK_SUSPEND}{RCK_GOSUB};
+	$gosub =~ s{
+		^ [ ]+ if \s* \Q$cond\E \s* (?&BLOCK)
+		\s* else \s* (?&BLOCK)
+		$CRE
+	}{
+		# for GOSUB this is true
+		deblock($true);
+	}xme;
+
+	my $text = <<TEXT;
+STATIC bool
+S_rck_gosub(pTHX_ RExC_state_t *pRExC_state, rck_params_t *params)
+$gosub
+
+TEXT
+	mod_file($REGCOMP, 'insert rck_gosub', sub {
+		s{(?= ^ STATIC \s+ void \s* S_rck_enframe )}{$text}xm;
+	});
+}
+
+sub clean_suspend {
+	mod_func($REGCOMP, 'clean rck_suspend', 'S_rck_suspend', sub {
+		# 'start' is always true, remove the condition
+		my $cond = '(start)';
+		s{
+			^ [ ]+ if \s* \Q$cond\E \s* ( (?&BLOCK) )
+			$CRE
+		}{
+			deblock($1);
+		}xme or die "could not deblock $cond";
+		# remove code after return
+		s{
+			( ^ [ ]* return \s+ 0 ; \n )
+			.*
+			(?= ^ \} \z )
+		}{$1}xms or die "could not elide unreachable code";
+		for my $var (qw{ paren start end }) {
+			$_ = hoist_assign($var, $_);
+		}
+		for my $var (qw{ paren my_recursed_depth }) {
+			$_ = elide_var($var, $_);
+		}
+		s{
+			( ^ [ ]* rck_enframe (?&PARENS) ; \n )
+			$CRE
+		}{
+			reindent_args($1, 'enframe', qr{\Qrck_enframe\E});
+		}xme or die "could not reindent rck_enframe args";
+		s{\n{3,}}{\n\n}g;
+		1;
+	});
+}
+
+sub clean_gosub {
+	my $indent;
+	mod_func($REGCOMP, 'clean rck_gosub', 'S_rck_gosub', sub {
+		for my $var (qw{ paren start end }) {
+			$_ = hoist_assign($var, $_);
+		}
+		s{
+			^ ([ ]*) start \s* = \s* NULL \s* ; \s* (?&COMMENT) \n
+			$CRE
+		}{
+			$indent = $1;
+			"${indent}params->scan = regnext(params->scan);\n"
+			. "${indent}return 0;\n"
+		}xme or die "could not replace fallthrough";
+		my $cond = "(\n"
+			. "        !params->recursed_depth\n"
+			. "        || !PAREN_TEST(params->recursed_depth - 1, paren)\n"
+			. "    )";
+		my $invcond = $cond;
+		$invcond =~ s/!//g;
+		$invcond =~ s/\|\|/&&/;
+		s{
+			^ ([ ]*) if \s* \Q$cond\E \s*
+			( (?&BLOCK) ) \s* else \s* ( (?&BLOCK) )
+			$CRE
+		}{
+			($indent, my $true, my $false) = ($1, $2, $3);
+			"${indent}if $invcond $false\n"
+			. "\n"
+			. deblock($true);
+		}xme or die "could not invert condition";
+
+		# 'start' is now always true, remove the condition
+		$cond = '(start)';
+		s{
+			^ [ ]* if \s* \Q$cond\E \s* ( (?&BLOCK) ) \n
+			$CRE
+		}{deblock($1)}xme or die "could not deblock $cond";
+		# remove code after return
+		s{
+			( 
+				^ [ ]* rck_enframe (?&PARENS) ; \n
+				^ [ ]* return \s+ 0 ; \n
+			)
+			.*
+			(?= ^ \} \z )
+			$CRE
+		}{$1}xms or die "could not elide unreachable code";
+		$_ = hoist_assign('my_recursed_depth', $_);
+		$_ = elide_var('my_recursed_depth', $_);
+
+		s{\n{3,}}{\n\n}g;
+		1;
+	});
+}
+
+sub extract_rck_exact {
+	my $cond = q{(   OP(params->scan) == EXACT
+             || OP(params->scan) == LEXACT
+             || OP(params->scan) == EXACT_REQ8
+             || OP(params->scan) == LEXACT_REQ8
+             || OP(params->scan) == EXACTL)};
+	extract_rck(
+		'rck_exact',
+		$cond,
+		[ sub {
+			my $str = 'STRING(params->scan)';
+			my $ustr = "(U8*)$str";
+			my $sdecl = "const U8 * const s = $ustr;";
+			s{
+				(?<= \A \{ \n )
+				( .* )
+				( ^ [ ]+ \Q$sdecl\E \n )
+			}{
+				outdent(4, $2) . $1
+			}xmse;
+			s{(?<!s = )\Q$ustr\E}{s}g;
+			s{(?<!\(U8\*\))\Q$str\E}{(char*)s}g;
+		}, sub {
+			s{
+				( ^ [ ]* SSize_t \s+ )
+				( bytelen \s+ = \s+ [^,]+ ) , \s*
+				( charlen ) ; \s* \n
+			}{$1$2;\n$1$3;\n}xm or die 'could not split byte/char decls';
+			$_ = hoist_cond('uc', '(UTF)', $_);
+			$_ = hoist_assign('uc', $_);
+			$_ = hoist_cond('charlen', '(UTF)', $_);
+			$_ = hoist_assign('charlen', $_);
+			s{
+				^ [ ]* if \s+ \(UTF\)
+				\s* \{ \s* \} \s* else \s* \{ \s* \} \s*? \n
+			}{}xm;
+			# avoid signed/unsigned warning in ternary
+			s{(?=utf8_length)}{(SSize_t) };
+			s{\*\(s\)}{*s};
+		} ],
+	);
+}
+
+sub unfolded_multi_char {
+	my $sig = q{NN bool *unfolded_multi_char};
+	mod_embed('join_exact public signature', 'join_exact', sub {
+		s{ ^ \s+ \| \Q$sig\E \s* \\ \n }{}xm;
+	});
+	my $oldcom = <<TEXT;
+ * And *unfolded_multi_char is set to indicate whether or not the node contains
+ * an unfolded multi-char fold.  This happens when it won't be known until
+TEXT
+	my $newcom = <<TEXT;
+ * If the node contains an unfolded multi-char fold, this records that we've
+ * seen it in RExC_seen.  This happens when it won't be known until
+TEXT
+	mod_file($REGCOMP, 'join_exact comment', sub {
+		s{^ \Q$oldcom\E}{$newcom}xm;
+	});
+	my $var = q{bool *unfolded_multi_char};
+	mod_file($REGCOMP, 'join_exact signature', sub {
+		m{
+			^ S_join_exact \s* ( (?&PARENS) )
+			$CRE
+		}xm or die "Could not locate join_exact signature";
+		my $substr = \(substr $_, $-[1], $+[1] - $-[1]);
+		$$substr =~ s{ \Q$var\E \s* , \s+ }{}xm
+				or die "Could not elide var in signature";
+	});
+	mod_func($REGCOMP, 'elide in join_exact', 'S_join_exact', sub {
+		s{
+			^ ([ ]*) \* unfolded_multi_char \s* = \s* (TRUE | FALSE) \s* ; \n
+		}{
+			my $true = ($2 eq 'TRUE') ? 1 : 0;
+			$true ? "${1}RExC_seen |= REG_UNFOLDED_MULTI_SEEN;\n"
+					: '';
+		}xmeg;
+	});
+	for my $func (qw{ study_chunk_one_node regtail_study }) {
+		mod_func($REGCOMP, "elide in $func", "S_$func", sub {
+			s{
+				^ [ \t]* bool \s+ unfolded_multi_char \s*
+				(?: = \s* FALSE \s* )?
+				; (?: [ \t]* (?&COMMENT) )? [ ]* \n
+				$CRE
+			}{}xm or die "Could not elide decl";
+			m{
+				join_exact \s* ( (?&PARENS) )
+				$CRE
+			}x or die "Could not locate join_exact call";
+			my $substr = \(substr $_, $-[1], $+[1] - $-[1]);
+			$$substr =~ s{
+				\& unfolded_multi_char \s* , \s*
+			}{}x or die "Could not elide in join_exact call";
+			if ($func eq 'study_chunk_one_node') {
+				s{
+					^ [ ]* if \s* \( unfolded_multi_char \) \s* (?&BLOCK)
+					$CRE
+				}{}xm or die "Could not elide use";
+			}
+			1;
+		});
+	}
+}
+			
+sub extract_rck_exactf {
+	my $cond = q{(PL_regkind[OP(params->scan)] == EXACT)};
+	extract_rck(
+		'rck_exactf',
+		$cond,
+		[ sub {
+			s{
+				^ [ ]+ (?&COMMENT) \n
+				$CRE
+			}{}xm;
+		}, sub {
+			s{
+				( ^ [ ]* (?=SSize_t \s* bytelen) (?&DECL) \n )
+				( ^ [ ]* (?= const \s* U8 [\s*]* s) (?&DECL) \n )
+				$CRE
+			}{$2$1}xm or die 'could not reorder decls';
+			s{
+				( ^ [ ]* SSize_t \s+ )
+				( bytelen \s+ = \s+ [^,]+ ) , \s*
+				( charlen ) ; \s*? \n
+			}{$1$2;\n$1$3;\n}xm or die 'could not split byte/char decls';
+			$_ = hoist_assign('charlen', $_);
+		} ],
+	);
+	mod_embed('rck_exactf public signature', 'rck_exactf', sub {
+		s{(?= \n \z)}{
+			" \\\n"
+			. "\t\t\t\t\|UV min_subtract"
+		}xe;
+	});
+	mod_file($REGCOMP, 'rck_exactf signature', sub {
+		my $s = substr_paren(qr{^S_rck_exactf\b}m);
+		$$s =~ s{(?= \) \z )}{
+			",\n" . indent(8, "UV min_subtract")
+		}xme;
+	});
+	mod_func($REGCOMP, 'pass min_subtract in', 'S_study_chunk_one_node', sub {
+		my $s = substr_paren(qr{\brck_exactf\b});
+		$$s =~ s{(?= \) \z )}{, min_subtract}x;
+	});
+}
+
+sub extract_rck_exactish {
+	embed(
+		'rck_exactish', 'ES', 'bool',
+		[ 'NN RExC_state_t *pRExC_state', 'NN rck_params_t *params' ],
+		{ before => 'rck_exact' },
+	);
+	my($decl, $join, $switch);
+	mod_func($REGCOMP, 'extract exactish', 'S_study_chunk_one_node', sub {
+		s{
+			^ [ ]* (
+				UV \s+ min_subtract \s* = \s* 0 \s* ; \s* (?&COMMENT)
+			) \n
+			$CRE
+		}{ $decl = $1; '' }xme;
+		s{
+			^ \n ^ [ ]* (
+				(?&COMMENT) \n
+				^ [ ]* if \s* (?&PARENS) \s*
+				join_exact \s* (?&PARENS) \s* ;
+			) \n
+			^ \n
+			$CRE
+		}{ $join = $1; '' }xme;
+		s{
+			^ ([ ]*) ( \} \s* else ) \s+
+			(
+				if \s* \(
+				\s* OP \( params->scan \) \s* == \s* EXACT
+				\s* \|\| \s* OP \( params->scan \) \s* == \s* LEXACT
+				\s* \|\| \s* OP \( params->scan \) \s* == \s* EXACT_REQ8
+				\s* \|\| \s* OP \( params->scan \) \s* == \s* LEXACT_REQ8
+				\s* \|\| \s* OP \( params->scan \) \s* == \s* EXACTL
+				\) \s* (?&BLOCK) \s* else
+			) \s+
+			( if \s+ (?&PARENS) ) \s*
+			( (?&BLOCK) )
+			$CRE
+		}{
+			my($indent, $leader, $first, $cont, $second) = ($1, $2, $3, $4, $5);
+			$switch = "$first $second";
+			"$indent$leader $cont \{\n"
+			. indent(4, "${indent}return rck_exactish(pRExC_state, params);\n")
+			. "${indent}\}";
+		}xme;
+	});
+	$decl =~ s{mmany}{many};
+	my $elider = q{PL_regkind[OP(params->scan)] == EXACT && };
+	$join =~ s{\Q$elider\E}{};
+	$join =~ s{LEXACT \s* &&}{LEXACT &&}x;
+	$switch =~ s{     (?=\|\| OP)}{}g;	# line up the tests
+	$switch =~ s{(?<=EXACTL)(?=\) \{)}{
+		"\n    "
+	}e;
+	my $text = <<TEXT;
+STATIC bool
+S_rck_exactish(pTHX_ RExC_state_t *pRExC_state, rck_params_t *params)
+{
+    $decl
+
+    PERL_ARGS_ASSERT_RCK_EXACTISH;
+
+    $join
+
+    $switch
+}
+
+TEXT
+	mod_file($REGCOMP, 'insert rck_exactish', sub {
+		s{(?= ^ STATIC \s+ bool \s* S_rck_exact )}{$text}xm;
+	});
+}
+
+sub extract_varies1 {
+	for my $name (qw{ whilem refish clump }) {
+		embed(
+			"rck_$name", 'ES', 'bool',
+			[ 'NN RExC_state_t *pRExC_state', 'NN rck_params_t *params' ],
+			{ before => 'get_ANYOFM_contents' },
+		);
+	}
+	my($indent, $whilem, $whilemc, $refclump);
+	my $intro = q[} else if (REGNODE_VARIES(OP(params->scan))) {];
+	my $switch = q[switch (PL_regkind[OP(params->scan)]) {];
+	mod_func($REGCOMP, 'whilem and refclump', 'S_study_chunk_one_node', sub {
+		s{
+			(
+				^ ([ ]*) \Q$intro\E \n
+				(?: [ ]* (?&DECL) \n )*
+				\s+ \Q$switch\E \n
+			)
+			^ [ ]* case \s+ WHILEM: \s* ( (?&COMMENT) ) \n
+			(
+				(?: ^ (?&STMT) (?&WS) \n )*
+			)
+			( (?:
+				^ [ ]* (?: case \s+ (?! REF | CLUMP ) \w+ | default ) \s* :
+				(?&WS) \n
+				(?: ^ (?&STMT) (?&WS) \n )*
+			)*? )
+			^ [ ]* case \s+ REF: \n
+			^ [ ]* case \s+ CLUMP: \n
+			(
+				(?: ^ (?&STMT) (?&WS) \n )*
+			)
+			$CRE
+		}{
+			(my $preserve1, $indent, $whilemc, $whilem) = ($1, $2, $3, $4);
+			(my $preserve2, $refclump) = ($5, $6);
+			"$indent\} else if (OP(params->scan) == WHILEM) \{\n"
+			. indent(4, "${indent}return rck_whilem(pRExC_state, params);\n")
+			. "$indent\} else if (PL_regkind[OP(params->scan)] == REF) \{\n"
+			. indent(4, "${indent}return rck_refish(pRExC_state, params);\n")
+			. "$indent\} else if (OP(params->scan) == CLUMP) \{\n"
+			. indent(4, "${indent}return rck_clump(pRExC_state, params);\n")
+			. $preserve1
+			. $preserve2;
+		}xmse;
+	});
+	$whilem = outdent(8, $whilem);
+	$refclump = outdent(8, $refclump);
+	my($ref, $clump);
+	my $cond = q{(OP(params->scan) == CLUMP)};
+	$refclump =~ s{
+		^ ([ ]*) break ; \n
+	}{
+		my $indent = $1;
+		"${indent}params->scan = regnext(params->scan);\n"
+		. "${indent}return 0;\n";
+	}xme or die "Could not find break";
+	$refclump =~ s{
+		^ [ ]* if \s* \Q$cond\E \s* ( (?&BLOCK) )
+		\s* else \s* ( (?&BLOCK) ) \s*? \n
+		$CRE
+	}{
+		($clump, $ref) = ($1, $2);
+		"\0";
+	}xme or die "Could not find CLUMP test";
+	chomp $whilem;
+	chomp $refclump;
+	$$_ = ($refclump =~ s{\0}{deblock($$_)}re) for (\$ref, \$clump);
+	my $text = <<TEXT;
+$whilemc
+STATIC bool
+S_rck_whilem(pTHX_ RExC_state_t *pRExC_state, rck_params_t *params)
+{
+    PERL_UNUSED_VAR(pRExC_state);
+
+    PERL_ARGS_ASSERT_RCK_WHILEM;
+
+$whilem
+}
+
+STATIC bool
+S_rck_refish(pTHX_ RExC_state_t *pRExC_state, rck_params_t *params)
+{
+    PERL_ARGS_ASSERT_RCK_REFISH;
+
+$ref
+}
+
+STATIC bool
+S_rck_clump(pTHX_ RExC_state_t *pRExC_state, rck_params_t *params)
+{
+    PERL_ARGS_ASSERT_RCK_CLUMP;
+
+$clump
+}
+
+TEXT
+	mod_file($REGCOMP, 'insert rck_whilem', sub {
+		s{(?= ^ STATIC \s+ bool \s* S_study_chunk_one_node )}{$text}xm;
+	});
+}
+
+sub extract_do_curly {
+	embed(
+		'rck_do_curly', 'ES', 'void',
+		[
+			'NN RExC_state_t *pRExC_state', 'NN rck_params_t *params',
+			'NN regnode *node', 'SSize_t mincount', 'SSize_t maxcount',
+			'I32 next_is_eval',
+		],
+		{ before => 'get_ANYOFM_contents' },
+	);
+}
