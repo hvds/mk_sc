@@ -1,4 +1,4 @@
-#!/usr/bin/perl -w
+#!/opt/v5.30.0-d/bin/perl -w
 use strict;
 use List::Util qw{max};
 
@@ -17,8 +17,8 @@ my $CRE = qr{
 				(?> [ \t]+ )
 				| (?> (?&COMMENT) )
 				(?# treat preprocessor directives as whitespace )
-				| \n (?! \#)
-				| (?: \n | ^ ) (?> \# .* (?= \n) )
+				| \n (?! \x23)
+				| (?: \n | ^ ) (?> \x23 .* (?= \n) )
 			)+
 			| (?<= \W)
 			| (?= \W)
@@ -40,18 +40,18 @@ my $CRE = qr{
 			(?&PARENS) | (?&PROT) | / (?! \*) | (?> [^;"'/()]+ )
 		)* ; )
 		(?<KEYWORD> (?: if | else | while | switch | case | default ) \b )
+		(?<CASE> (?: case \s+ \w+ | default ) \s* : )
 		(?<STMT>
-			(?> (?&WS) )
 			(?>
 				(?# optional labels )
 				(?! (?&KEYWORD) )
 				(?> (?&ID) ) (?> (?&WS) ) : (?> (?&WS) )
 			)*
 			(?>
-				if (?> (?&WS) ) (?> (?&PARENS) ) (?> (?&STMT) )
-				(?> (?> (?&WS) ) else (?> (?&STMT) ) )?
+				if (?> (?&WS) ) (?> (?&PARENS) ) (?> (?&WS) ) (?> (?&STMT) )
+				(?> (?> (?&WS) ) else (?> (?&WS) ) (?> (?&STMT) ) )?
 			|
-				while (?&WS) (?&PARENS) (?&STMT)
+				while (?&WS) (?&PARENS) (?> (?&WS) ) (?&STMT)
 			|
 				switch (?&WS) (?&PARENS) (?&WS) (?&BLOCK)
 			|
@@ -213,6 +213,10 @@ study_chunk: extract rck_do_curly
 .. and simplify optimize_curly_tail to rck_elide_nothing()
 TEXT
 
+apply(\&extract_varies2, <<TEXT);
+study_chunk: extract rck_plus, rck_star, rck_curlyish
+TEXT
+
 exit 0;
 
 sub sys {
@@ -360,6 +364,8 @@ sub reindent_args {
 		my $new = 4 + length($indent);
 		$args =~ s/^\(//;
 		$args =~ s/\)\z//;
+		$args =~ s{[ \t]*\n\s+}{ }g;
+		$args =~ s{[ \t]*,}{,}g;
 		my @args = split /(?<=,)\s*/, $args;
 		my @lines;
 		while (@args) {
@@ -1794,17 +1800,17 @@ sub extract_varies1 {
 			)
 			^ [ ]* case \s+ WHILEM: \s* ( (?&COMMENT) ) \n
 			(
-				(?: ^ (?&STMT) (?&WS) \n )*
+				(?: ^ (?> (?&WS) ) (?&STMT) (?&WS) \n )*
 			)
 			( (?:
 				^ [ ]* (?: case \s+ (?! REF | CLUMP ) \w+ | default ) \s* :
 				(?&WS) \n
-				(?: ^ (?&STMT) (?&WS) \n )*
+				(?: ^ (?> (?&WS) ) (?&STMT) (?&WS) \n )*
 			)*? )
 			^ [ ]* case \s+ REF: \n
 			^ [ ]* case \s+ CLUMP: \n
 			(
-				(?: ^ (?&STMT) (?&WS) \n )*
+				(?: ^ (?> (?&WS) ) (?&STMT) (?&WS) \n )*
 			)
 			$CRE
 		}{
@@ -1886,4 +1892,136 @@ sub extract_do_curly {
 		],
 		{ before => 'get_ANYOFM_contents' },
 	);
+	my $cond = '(OP(oscan) != CURLYX)';
+	my $text;
+	mod_func($REGCOMP, 'extractions', 'S_study_chunk_one_node', sub {
+		s{
+			^ ( [ ]* SSize_t \b .*? )
+			, \s* minnext
+			, \s* deltanext
+			, \s* pos_before \s* = \s* 0
+			(?= ,|;)
+		}{$1}xm;
+		s{
+			^ [ ]* I32 \s+ fl \s* = \s* 0 , \s*
+			f \s* = \s* params->flags ; \n
+		}{}xm;
+		s{
+			^ [ ]* regnode_ssc \s* this_class ; \n
+			^ [ ]* regnode_ssc \s* \*oclass \s* = \s* NULL ; \n
+		}{}xm;
+		s{
+			( ^ [ ]* optimize_curly_tail: \n )
+			([ ]*) if \s+ \Q$cond\E \s+ (?&BLOCK) \n
+			(?= [ ]* return \s+ 0; )
+			$CRE
+		}{
+			$1
+			. "${2}rck_elide_nothing(oscan);\n"
+			. "${2}params->next = regnext(oscan);\n";
+		}xme or die "could not optimize curly tail";
+		s{
+			( ^ [ ]* do_curly: \n )
+			( (?= ([ ]*) ) (?s: .*? ) )
+			(?= ^ [ ]* optimize_curly_tail: \n )
+		}{
+			(my $label, $text, my $indent) = ($1, $2, $3);
+			$label
+			. "${indent}rck_do_curly(pRExC_state, params, oscan, mincount, maxcount, next_is_eval);\n";
+		}xme or die "could not extract do_curly";
+	});
+	$text = outdent(8, $text);
+	$text =~ s{\boscan\b}{node}g;
+	$text =~ s{(?<=\w) \ ? \| \ ? (?=\w)}{ | }xg;
+	$text =~ s{(?<=\)) \ ? == \ ? (?=\w)}{ == }xg;
+	$text =~ s{(?<=\w) [ ]* \+ [ ]* (?=\w)}{ + }xg;
+	$text =~ s{[ ]* \n \s+ \+ [ ]* 1;}{ + 1;}x;
+	$text =~ s{while [ ]* \( \s* (\(?) }{while ($1}xg;
+	$text =~ s{big \s* count}{big count}x;
+	$text = reindent_args($text, 'recursed call',
+			qr{\Qminnext = study_chunk\E\b});
+	$text = reindent_args($text, 'recursed call',
+			qr{study_chunk\b});
+	$text =~ s{ \} \s+ else }{\} else}xg;
+	$text =~ s{= - }{= -}g;
+	$text =~ s{
+		^ ([ ]+) (\Qparams->data->pos_delta += -counted * deltanext\E)
+		[ ]* \+ \s*
+	}{
+		"$1$2\n" . indent(8, "$1+ ")
+	}xme;
+	$text =~ s{inside \s+ the [ ]* group}{inside the group}x;
+	chomp($text);
+	$text = <<TEXT;
+STATIC void
+S_rck_do_curly(pTHX_ RExC_state_t *pRExC_state, rck_params_t *params,
+        regnode * const node, SSize_t mincount, SSize_t maxcount, I32 next_is_eval)
+{
+    SSize_t minnext, deltanext, pos_before = 0;
+    I32 fl = 0, f = params->flags;
+    regnode_ssc this_class;
+    regnode_ssc *oclass = NULL;
+
+    PERL_ARGS_ASSERT_RCK_DO_CURLY;
+
+$text
+    return;
+}
+
+TEXT
+	mod_file($REGCOMP, 'insert do_curly', sub {
+		s{(?= ^ STATIC \s+ bool \s* S_study_chunk_one_node )}{$text}xm;
+	});
+}
+
+sub extract_varies2 {
+	mod_func($REGCOMP, 'elide labels', 'S_study_chunk_one_node', sub {
+		my $cond = q{(PL_regkind[OP(params->scan)])};
+		my $varies = substr_block(qr{
+			^ [ ]* switch \s* \Q$cond\E
+		}xm);
+		($$varies, $varies) = ("\0", $$varies);
+		$varies = deblock($varies);
+		# remove the labels, duplicating the code the gotos would reach
+		for my $label (qw{ optimize_curly_tail do_curly }) {
+			my($indent, $code);
+			$varies =~ s{
+				^ [ ]* \Q$label\E : \n
+				(
+					(?: ^ (?&WS) (?&STMT) (?&WS) \n )*?
+					^ [ ]* return \s* 0; \n
+				)
+				$CRE
+			}{
+				$code = $1;
+				$1;
+			}xme or die "could not locate label $label";
+			$code =~ /^ ([ ]*)/xm
+					or die "could not count indent";
+			$indent = $1;
+			$varies =~ s{
+				^ ([ ]*) goto \s* \Q$label\E \s* ; \n
+			}{
+				my $ind = length($1) - length($indent);
+				$ind > 0
+					? indent($ind, $code)
+					: outdent(-$ind, $code)
+			}xmeg;
+		}
+		# code is now linear, extract the cases
+		my @case;
+		use Regexp::Debugger;
+		$varies =~ s{
+			( ^ [ ]* (?&CASE) (?&WS) \n )
+			( (?: ^ (?&WS) (?&STMT) (?&WS) \n )* )
+			(?= \z | (?&CASE) )
+			$CRE
+		}{
+			push @case, [ $1, $2 ];
+			'';
+		}xmeg;
+		length($varies) == 0 or die "could not extract {$varies}";
+		my $fallthrough = q{/* FALLTHROUGH */};
+		1;
+	});
 }
